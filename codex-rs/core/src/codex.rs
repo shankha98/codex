@@ -27,6 +27,7 @@ use crate::models_manager::manager::ModelsManager;
 use crate::parse_command::parse_command;
 use crate::parse_turn_item;
 use crate::rollout::session_index;
+use crate::slate_client::SlateClient;
 use crate::stream_events_utils::HandleOutputCtx;
 use crate::stream_events_utils::handle_non_tool_response_item;
 use crate::stream_events_utils::handle_output_item_done;
@@ -283,6 +284,13 @@ impl Codex {
             .map_err(|err| CodexErr::Fatal(format!("failed to load rules: {err}")))?;
 
         let config = Arc::new(config);
+
+        let slate_client = Arc::new(SlateClient::new("http://localhost:3001"));
+        let memories = slate_client
+            .reminisce("Session Start")
+            .await
+            .unwrap_or_default();
+
         let _ = models_manager
             .list_models(
                 &config,
@@ -302,11 +310,15 @@ impl Codex {
         // 2. conversation history => session_meta.base_instructions
         // 3. base_intructions for current model
         let model_info = models_manager.get_model_info(model.as_str(), &config).await;
-        let base_instructions = config
+        let mut base_instructions = config
             .base_instructions
             .clone()
             .or_else(|| conversation_history.get_base_instructions().map(|s| s.text))
             .unwrap_or_else(|| model_info.get_model_instructions(config.personality));
+
+        if !memories.is_empty() {
+            base_instructions.push_str(&format!("\n\n# Memories\n\n{}", memories.join("\n\n")));
+        }
 
         // Respect thread-start tools. When missing (resumed/forked threads), read from the db
         // first, then fall back to rollout-file tools.
@@ -388,6 +400,7 @@ impl Codex {
             session_source_clone,
             skills_manager,
             agent_control,
+            slate_client,
         )
         .instrument(session_init_span)
         .await
@@ -756,6 +769,7 @@ impl Session {
         session_source: SessionSource,
         skills_manager: Arc<SkillsManager>,
         agent_control: AgentControl,
+        slate_client: Arc<SlateClient>,
     ) -> anyhow::Result<Arc<Self>> {
         debug!(
             "Configuring session: model={}; provider={:?}",
@@ -957,6 +971,7 @@ impl Session {
             agent_control,
             state_db: state_db_ctx.clone(),
             transport_manager: TransportManager::new(),
+            slate_client,
         };
 
         let sess = Arc::new(Session {
@@ -2435,6 +2450,21 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
     while let Ok(sub) = rx_sub.recv().await {
         debug!(?sub, "Submission");
         match sub.op.clone() {
+            Op::Shutdown => {
+                let _ = sess
+                    .services
+                    .slate_client
+                    .commit(
+                        "Session",
+                        "Ended",
+                        "Session Ended",
+                        "User requested shutdown",
+                    )
+                    .await;
+                if handlers::shutdown(&sess, sub.id.clone()).await {
+                    break;
+                }
+            }
             Op::Interrupt => {
                 handlers::interrupt(&sess).await;
             }
@@ -2554,11 +2584,7 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
             } => {
                 handlers::resolve_elicitation(&sess, server_name, request_id, decision).await;
             }
-            Op::Shutdown => {
-                if handlers::shutdown(&sess, sub.id.clone()).await {
-                    break;
-                }
-            }
+
             Op::Review { review_request } => {
                 handlers::review(&sess, &config, sub.id.clone(), review_request).await;
             }
@@ -2697,6 +2723,56 @@ mod handlers {
             ),
             _ => unreachable!(),
         };
+
+        let text = items
+            .iter()
+            .filter_map(|item| match item {
+                UserInput::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let mut items = items;
+        if !text.is_empty() {
+            let slate_client = Arc::clone(&sess.services.slate_client);
+            let focus_text = text.clone();
+            let focus_client = slate_client.clone();
+            tokio::spawn(async move {
+                let _ = focus_client.focus(&focus_text).await;
+                // Commit user input to ensure immediate persistence across sessions
+                let _ = focus_client
+                    .commit(
+                        &focus_text,
+                        "User Input",
+                        "User Turn",
+                        "Capturing user input for memory",
+                    )
+                    .await;
+            });
+
+            if let Ok(memories) = slate_client.reminisce(&text).await {
+                if !memories.is_empty() {
+                    let memory_text =
+                        format!("\n\n# Relevant Memories\n\n{}", memories.join("\n\n"));
+
+                    let mut injected = false;
+                    for item in &mut items {
+                        if let UserInput::Text { text, .. } = item {
+                            text.push_str(&memory_text);
+                            injected = true;
+                            break;
+                        }
+                    }
+                    if !injected {
+                        items.push(UserInput::Text {
+                            text: memory_text,
+                            text_elements: vec![],
+                        });
+                    }
+                }
+            }
+        }
 
         let Ok(current_context) = sess.new_turn_with_sub_id(sub_id, updates).await else {
             // new_turn_with_sub_id already emits the error event.

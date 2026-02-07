@@ -95,6 +95,7 @@ pub mod seatbelt;
 pub mod shell;
 pub mod shell_snapshot;
 pub mod skills;
+pub mod slate_client;
 pub mod spawn;
 pub mod state_db;
 pub mod terminal;

@@ -8,6 +8,7 @@ use crate::exec_policy::ExecPolicyManager;
 use crate::mcp_connection_manager::McpConnectionManager;
 use crate::models_manager::manager::ModelsManager;
 use crate::skills::SkillsManager;
+use crate::slate_client::SlateClient;
 use crate::state_db::StateDbHandle;
 use crate::tools::sandboxing::ApprovalStore;
 use crate::transport_manager::TransportManager;
@@ -36,4 +37,5 @@ pub(crate) struct SessionServices {
     pub(crate) agent_control: AgentControl,
     pub(crate) state_db: Option<StateDbHandle>,
     pub(crate) transport_manager: TransportManager,
+    pub(crate) slate_client: Arc<SlateClient>,
 }
