@@ -1219,11 +1219,55 @@ fn sanitize_json_schema(value: &mut JsonValue) {
     }
 }
 
+fn create_save_memory_tool() -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "content".to_string(),
+            JsonSchema::String {
+                description: Some("The information to save.".to_string()),
+            },
+        ),
+        (
+            "category".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "The type of information (e.g., \"Project Summary\", \"Decision\", \"Fact\")."
+                        .to_string(),
+                ),
+            },
+        ),
+        (
+            "reasoning".to_string(),
+            JsonSchema::String {
+                description: Some("Why this information is being saved.".to_string()),
+            },
+        ),
+    ]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "save_memory".to_string(),
+        description:
+            "Save important information, summaries, or architectural decisions to long-term memory."
+                .to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec![
+                "content".to_string(),
+                "category".to_string(),
+                "reasoning".to_string(),
+            ]),
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
 /// Builds the tool registry builder while collecting tool specs for later serialization.
 pub(crate) fn build_specs(
     config: &ToolsConfig,
     mcp_tools: Option<HashMap<String, rmcp::model::Tool>>,
     dynamic_tools: &[DynamicToolSpec],
+    slate_skills: &[DynamicToolSpec],
 ) -> ToolRegistryBuilder {
     use crate::tools::handlers::ApplyPatchHandler;
     use crate::tools::handlers::CollabHandler;
@@ -1235,8 +1279,10 @@ pub(crate) fn build_specs(
     use crate::tools::handlers::PlanHandler;
     use crate::tools::handlers::ReadFileHandler;
     use crate::tools::handlers::RequestUserInputHandler;
+    use crate::tools::handlers::SaveMemoryHandler;
     use crate::tools::handlers::ShellCommandHandler;
     use crate::tools::handlers::ShellHandler;
+    use crate::tools::handlers::SlateHandler;
     use crate::tools::handlers::TestSyncHandler;
     use crate::tools::handlers::UnifiedExecHandler;
     use crate::tools::handlers::ViewImageHandler;
@@ -1249,11 +1295,13 @@ pub(crate) fn build_specs(
     let plan_handler = Arc::new(PlanHandler);
     let apply_patch_handler = Arc::new(ApplyPatchHandler);
     let dynamic_tool_handler = Arc::new(DynamicToolHandler);
+    let slate_handler = Arc::new(SlateHandler);
     let view_image_handler = Arc::new(ViewImageHandler);
     let mcp_handler = Arc::new(McpHandler);
     let mcp_resource_handler = Arc::new(McpResourceHandler);
     let shell_command_handler = Arc::new(ShellCommandHandler);
     let request_user_input_handler = Arc::new(RequestUserInputHandler);
+    let save_memory_handler = Arc::new(SaveMemoryHandler);
 
     match &config.shell_type {
         ConfigShellToolType::Default => {
@@ -1302,6 +1350,9 @@ pub(crate) fn build_specs(
 
     builder.push_spec(PLAN_TOOL.clone());
     builder.register_handler("update_plan", plan_handler);
+
+    builder.push_spec(create_save_memory_tool());
+    builder.register_handler("save_memory", save_memory_handler);
 
     if config.collaboration_modes_tools {
         builder.push_spec(create_request_user_input_tool());
@@ -1413,6 +1464,23 @@ pub(crate) fn build_specs(
                 Err(e) => {
                     tracing::error!(
                         "Failed to convert dynamic tool {:?} to OpenAI tool: {e:?}",
+                        tool.name
+                    );
+                }
+            }
+        }
+    }
+
+    if !slate_skills.is_empty() {
+        for tool in slate_skills {
+            match dynamic_tool_to_openai_tool(tool) {
+                Ok(converted_tool) => {
+                    builder.push_spec(ToolSpec::Function(converted_tool));
+                    builder.register_handler(tool.name.clone(), slate_handler.clone());
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to convert slate skill {:?} to OpenAI tool: {e:?}",
                         tool.name
                     );
                 }
@@ -1571,7 +1639,7 @@ mod tests {
             features: &features,
             web_search_mode: Some(WebSearchMode::Live),
         });
-        let (tools, _) = build_specs(&config, None, &[]).build();
+        let (tools, _) = build_specs(&config, None, &[], &[]).build();
 
         // Build actual map name -> spec
         use std::collections::BTreeMap;
@@ -1598,6 +1666,7 @@ mod tests {
             create_list_mcp_resource_templates_tool(),
             create_read_mcp_resource_tool(),
             PLAN_TOOL.clone(),
+            create_save_memory_tool(),
             create_request_user_input_tool(),
             create_apply_patch_freeform_tool(),
             ToolSpec::WebSearch {
@@ -1635,7 +1704,7 @@ mod tests {
             features: &features,
             web_search_mode: Some(WebSearchMode::Cached),
         });
-        let (tools, _) = build_specs(&tools_config, None, &[]).build();
+        let (tools, _) = build_specs(&tools_config, None, &[], &[]).build();
         assert_contains_tool_names(
             &tools,
             &["spawn_agent", "send_input", "wait", "close_agent"],
@@ -1653,7 +1722,7 @@ mod tests {
             features: &features,
             web_search_mode: Some(WebSearchMode::Cached),
         });
-        let (tools, _) = build_specs(&tools_config, None, &[]).build();
+        let (tools, _) = build_specs(&tools_config, None, &[], &[]).build();
         assert!(
             !tools.iter().any(|t| t.spec.name() == "request_user_input"),
             "request_user_input should be disabled when collaboration_modes feature is off"
@@ -1665,7 +1734,7 @@ mod tests {
             features: &features,
             web_search_mode: Some(WebSearchMode::Cached),
         });
-        let (tools, _) = build_specs(&tools_config, None, &[]).build();
+        let (tools, _) = build_specs(&tools_config, None, &[], &[]).build();
         assert_contains_tool_names(&tools, &["request_user_input"]);
     }
 
@@ -1682,7 +1751,7 @@ mod tests {
             features,
             web_search_mode,
         });
-        let (tools, _) = build_specs(&tools_config, Some(HashMap::new()), &[]).build();
+        let (tools, _) = build_specs(&tools_config, Some(HashMap::new()), &[], &[]).build();
         let tool_names = tools.iter().map(|t| t.spec.name()).collect::<Vec<_>>();
         assert_eq!(&tool_names, &expected_tools,);
     }
@@ -1698,7 +1767,7 @@ mod tests {
             features: &features,
             web_search_mode: Some(WebSearchMode::Cached),
         });
-        let (tools, _) = build_specs(&tools_config, None, &[]).build();
+        let (tools, _) = build_specs(&tools_config, None, &[], &[]).build();
 
         let tool = find_tool(&tools, "web_search");
         assert_eq!(
@@ -1720,7 +1789,7 @@ mod tests {
             features: &features,
             web_search_mode: Some(WebSearchMode::Live),
         });
-        let (tools, _) = build_specs(&tools_config, None, &[]).build();
+        let (tools, _) = build_specs(&tools_config, None, &[], &[]).build();
 
         let tool = find_tool(&tools, "web_search");
         assert_eq!(
@@ -1745,6 +1814,7 @@ mod tests {
                 "list_mcp_resource_templates",
                 "read_mcp_resource",
                 "update_plan",
+                "save_memory",
                 "request_user_input",
                 "apply_patch",
                 "web_search",
@@ -1767,6 +1837,7 @@ mod tests {
                 "list_mcp_resource_templates",
                 "read_mcp_resource",
                 "update_plan",
+                "save_memory",
                 "request_user_input",
                 "apply_patch",
                 "web_search",
@@ -1791,6 +1862,7 @@ mod tests {
                 "list_mcp_resource_templates",
                 "read_mcp_resource",
                 "update_plan",
+                "save_memory",
                 "request_user_input",
                 "apply_patch",
                 "web_search",
@@ -1815,6 +1887,7 @@ mod tests {
                 "list_mcp_resource_templates",
                 "read_mcp_resource",
                 "update_plan",
+                "save_memory",
                 "request_user_input",
                 "apply_patch",
                 "web_search",
@@ -1837,6 +1910,7 @@ mod tests {
                 "list_mcp_resource_templates",
                 "read_mcp_resource",
                 "update_plan",
+                "save_memory",
                 "request_user_input",
                 "web_search",
                 "view_image",
@@ -1858,6 +1932,7 @@ mod tests {
                 "list_mcp_resource_templates",
                 "read_mcp_resource",
                 "update_plan",
+                "save_memory",
                 "request_user_input",
                 "apply_patch",
                 "web_search",
@@ -1880,6 +1955,7 @@ mod tests {
                 "list_mcp_resource_templates",
                 "read_mcp_resource",
                 "update_plan",
+                "save_memory",
                 "request_user_input",
                 "web_search",
                 "view_image",
@@ -1901,6 +1977,7 @@ mod tests {
                 "list_mcp_resource_templates",
                 "read_mcp_resource",
                 "update_plan",
+                "save_memory",
                 "request_user_input",
                 "apply_patch",
                 "web_search",
@@ -1924,6 +2001,7 @@ mod tests {
                 "list_mcp_resource_templates",
                 "read_mcp_resource",
                 "update_plan",
+                "save_memory",
                 "request_user_input",
                 "apply_patch",
                 "web_search",
@@ -1948,6 +2026,7 @@ mod tests {
                 "list_mcp_resource_templates",
                 "read_mcp_resource",
                 "update_plan",
+                "save_memory",
                 "request_user_input",
                 "web_search",
                 "view_image",
@@ -1966,7 +2045,7 @@ mod tests {
             features: &features,
             web_search_mode: Some(WebSearchMode::Live),
         });
-        let (tools, _) = build_specs(&tools_config, Some(HashMap::new()), &[]).build();
+        let (tools, _) = build_specs(&tools_config, Some(HashMap::new()), &[], &[]).build();
 
         // Only check the shell variant and a couple of core tools.
         let mut subset = vec!["exec_command", "write_stdin", "update_plan"];
@@ -1988,7 +2067,7 @@ mod tests {
             features: &features,
             web_search_mode: Some(WebSearchMode::Cached),
         });
-        let (tools, _) = build_specs(&tools_config, None, &[]).build();
+        let (tools, _) = build_specs(&tools_config, None, &[], &[]).build();
 
         assert!(find_tool(&tools, "exec_command").supports_parallel_tool_calls);
         assert!(!find_tool(&tools, "write_stdin").supports_parallel_tool_calls);
@@ -2007,7 +2086,7 @@ mod tests {
             features: &features,
             web_search_mode: Some(WebSearchMode::Cached),
         });
-        let (tools, _) = build_specs(&tools_config, None, &[]).build();
+        let (tools, _) = build_specs(&tools_config, None, &[], &[]).build();
 
         assert!(
             tools
@@ -2063,6 +2142,7 @@ mod tests {
                     }),
                 ),
             )])),
+            &[],
             &[],
         )
         .build();
@@ -2140,7 +2220,7 @@ mod tests {
             ),
         ]);
 
-        let (tools, _) = build_specs(&tools_config, Some(tools_map), &[]).build();
+        let (tools, _) = build_specs(&tools_config, Some(tools_map), &[], &[]).build();
 
         // Only assert that the MCP tools themselves are sorted by fully-qualified name.
         let mcp_names: Vec<_> = tools
@@ -2183,6 +2263,7 @@ mod tests {
                     }),
                 ),
             )])),
+            &[],
             &[],
         )
         .build();
@@ -2234,6 +2315,7 @@ mod tests {
                 ),
             )])),
             &[],
+            &[],
         )
         .build();
 
@@ -2282,6 +2364,7 @@ mod tests {
                     }),
                 ),
             )])),
+            &[],
             &[],
         )
         .build();
@@ -2335,6 +2418,7 @@ mod tests {
                     }),
                 ),
             )])),
+            &[],
             &[],
         )
         .build();
@@ -2460,6 +2544,7 @@ Examples of valid command strings:
                     }),
                 ),
             )])),
+            &[],
             &[],
         )
         .build();

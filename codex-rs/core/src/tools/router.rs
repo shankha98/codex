@@ -37,8 +37,9 @@ impl ToolRouter {
         config: &ToolsConfig,
         mcp_tools: Option<HashMap<String, Tool>>,
         dynamic_tools: &[DynamicToolSpec],
+        slate_skills: &[DynamicToolSpec],
     ) -> Self {
-        let builder = build_specs(config, mcp_tools, dynamic_tools);
+        let builder = build_specs(config, mcp_tools, dynamic_tools, slate_skills);
         let (specs, registry) = builder.build();
 
         Self { registry, specs }

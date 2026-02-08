@@ -1,4 +1,5 @@
 use anyhow::Context;
+use codex_protocol::dynamic_tools::DynamicToolSpec;
 use reqwest::Client;
 use serde::Deserialize;
 use serde::Serialize;
@@ -14,6 +15,10 @@ pub struct SlateClient {
 struct CreateMemoryRequest<'a> {
     project_id: &'a str,
     content: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    relevance: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decay: Option<f32>,
 }
 
 #[derive(Deserialize)]
@@ -30,7 +35,12 @@ impl SlateClient {
         }
     }
 
-    pub async fn focus(&self, content: &str) -> anyhow::Result<()> {
+    pub async fn focus(
+        &self,
+        content: &str,
+        relevance: Option<f32>,
+        decay: Option<f32>,
+    ) -> anyhow::Result<()> {
         let url = format!("{}/v1/context", self.base_url);
         let res = self
             .client
@@ -38,6 +48,8 @@ impl SlateClient {
             .json(&CreateMemoryRequest {
                 project_id: &self.project_id,
                 content,
+                relevance,
+                decay,
             })
             .send()
             .await?;
@@ -47,6 +59,44 @@ impl SlateClient {
             return Err(e.into());
         }
         eprintln!("Slate focused on content length: {}", content.len());
+        Ok(())
+    }
+
+    pub async fn focus_transient(&self, content: &str) -> anyhow::Result<()> {
+        self.focus(content, None, Some(0.5)).await
+    }
+
+    pub async fn focus_important(&self, content: &str) -> anyhow::Result<()> {
+        self.focus(content, Some(1.5), Some(0.01)).await
+    }
+
+    pub async fn trigger_skill(
+        &self,
+        skill_name: &str,
+        args: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let url = format!("{}/v1/skills/{}/run", self.base_url, skill_name);
+        #[derive(Serialize)]
+        struct RunSkillRequest<'a> {
+            project_id: &'a str,
+            input: serde_json::Value,
+        }
+
+        let res = self
+            .client
+            .post(&url)
+            .json(&RunSkillRequest {
+                project_id: &self.project_id,
+                input: args,
+            })
+            .send()
+            .await?;
+
+        if let Err(e) = res.error_for_status_ref() {
+            eprintln!("Slate trigger_skill error status: {}", e);
+            return Err(e.into());
+        }
+        eprintln!("Slate triggered skill: {}", skill_name);
         Ok(())
     }
 
@@ -98,6 +148,8 @@ impl SlateClient {
             .json(&CreateMemoryRequest {
                 project_id: &self.project_id,
                 content: &content,
+                relevance: None,
+                decay: None,
             })
             .send()
             .await?;
@@ -108,5 +160,44 @@ impl SlateClient {
         }
         eprintln!("Slate committed: {} -> {}", input, outcome);
         Ok(())
+    }
+
+    pub async fn fetch_skills(&self) -> anyhow::Result<Vec<DynamicToolSpec>> {
+        let url = format!("{}/v1/skills", self.base_url);
+
+        #[derive(Deserialize)]
+        struct SlateSkill {
+            name: String,
+            description: String,
+            input_schema: serde_json::Value,
+        }
+
+        let res = self
+            .client
+            .get(&url)
+            .query(&[("project_id", &self.project_id)])
+            .send()
+            .await?;
+
+        if let Err(e) = res.error_for_status_ref() {
+            eprintln!("Slate fetch_skills error status: {}", e);
+            if e.status() == Some(reqwest::StatusCode::NOT_FOUND) {
+                return Ok(vec![]);
+            }
+            return Err(e.into());
+        }
+
+        let skills: Vec<SlateSkill> = res.json().await?;
+
+        let tools = skills
+            .into_iter()
+            .map(|skill| DynamicToolSpec {
+                name: skill.name,
+                description: skill.description,
+                input_schema: skill.input_schema,
+            })
+            .collect();
+
+        Ok(tools)
     }
 }

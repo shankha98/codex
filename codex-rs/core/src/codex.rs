@@ -291,6 +291,11 @@ impl Codex {
             .await
             .unwrap_or_default();
 
+        let mut slate_skills = slate_client.fetch_skills().await.unwrap_or_else(|e| {
+            warn!("Failed to fetch skills from Slate: {}", e);
+            vec![]
+        });
+
         let _ = models_manager
             .list_models(
                 &config,
@@ -381,6 +386,7 @@ impl Codex {
             original_config_do_not_use: Arc::clone(&config),
             session_source,
             dynamic_tools,
+            slate_skills,
         };
 
         // Generate a unique ID for the lifetime of this Codex session.
@@ -517,6 +523,7 @@ pub(crate) struct TurnContext {
     pub(crate) tool_call_gate: Arc<ReadinessFlag>,
     pub(crate) truncation_policy: TruncationPolicy,
     pub(crate) dynamic_tools: Vec<DynamicToolSpec>,
+    pub(crate) slate_skills: Vec<DynamicToolSpec>,
     turn_metadata_header: OnceCell<Option<String>>,
 }
 impl TurnContext {
@@ -612,6 +619,7 @@ pub(crate) struct SessionConfiguration {
     /// Source of the session (cli, vscode, exec, mcp, ...)
     session_source: SessionSource,
     dynamic_tools: Vec<DynamicToolSpec>,
+    slate_skills: Vec<DynamicToolSpec>,
 }
 
 impl SessionConfiguration {
@@ -752,6 +760,7 @@ impl Session {
             tool_call_gate: Arc::new(ReadinessFlag::new()),
             truncation_policy: model_info.truncation_policy.into(),
             dynamic_tools: session_configuration.dynamic_tools.clone(),
+            slate_skills: session_configuration.slate_skills.clone(),
             turn_metadata_header: OnceCell::new(),
         }
     }
@@ -2739,7 +2748,7 @@ mod handlers {
             let focus_text = text.clone();
             let focus_client = slate_client.clone();
             tokio::spawn(async move {
-                let _ = focus_client.focus(&focus_text).await;
+                let _ = focus_client.focus_important(&focus_text).await;
                 // Commit user input to ensure immediate persistence across sessions
                 let _ = focus_client
                     .commit(
@@ -3390,6 +3399,7 @@ async fn spawn_review_thread(
         codex_linux_sandbox_exe: parent_turn_context.codex_linux_sandbox_exe.clone(),
         tool_call_gate: Arc::new(ReadinessFlag::new()),
         dynamic_tools: parent_turn_context.dynamic_tools.clone(),
+        slate_skills: parent_turn_context.slate_skills.clone(),
         truncation_policy: model_info.truncation_policy.into(),
         turn_metadata_header: parent_turn_context.turn_metadata_header.clone(),
     };
@@ -3868,6 +3878,7 @@ async fn run_sampling_request(
                 .collect(),
         ),
         turn_context.dynamic_tools.as_slice(),
+        turn_context.slate_skills.as_slice(),
     ));
 
     let model_supports_parallel = turn_context
@@ -5177,6 +5188,7 @@ mod tests {
             original_config_do_not_use: Arc::clone(&config),
             session_source: SessionSource::Exec,
             dynamic_tools: Vec::new(),
+            slate_skills: Vec::new(),
         };
 
         let mut state = SessionState::new(session_configuration);
@@ -5260,6 +5272,7 @@ mod tests {
             original_config_do_not_use: Arc::clone(&config),
             session_source: SessionSource::Exec,
             dynamic_tools: Vec::new(),
+            slate_skills: Vec::new(),
         };
 
         let mut state = SessionState::new(session_configuration);
@@ -5530,6 +5543,7 @@ mod tests {
             original_config_do_not_use: Arc::clone(&config),
             session_source: SessionSource::Exec,
             dynamic_tools: Vec::new(),
+            slate_skills: Vec::new(),
         };
         let per_turn_config = Session::build_per_turn_config(&session_configuration);
         let model_info = ModelsManager::construct_model_info_offline(
@@ -5568,6 +5582,7 @@ mod tests {
             agent_control,
             state_db: None,
             transport_manager: TransportManager::new(),
+            slate_client: Arc::new(SlateClient::new("http://localhost:3001")),
         };
 
         let turn_context = Session::make_turn_context(
@@ -5650,6 +5665,7 @@ mod tests {
             original_config_do_not_use: Arc::clone(&config),
             session_source: SessionSource::Exec,
             dynamic_tools: Vec::new(),
+            slate_skills: Vec::new(),
         };
         let per_turn_config = Session::build_per_turn_config(&session_configuration);
         let model_info = ModelsManager::construct_model_info_offline(
@@ -5688,6 +5704,7 @@ mod tests {
             agent_control,
             state_db: None,
             transport_manager: TransportManager::new(),
+            slate_client: Arc::new(SlateClient::new("http://localhost:3001")),
         };
 
         let turn_context = Arc::new(Session::make_turn_context(
@@ -5983,6 +6000,7 @@ mod tests {
                     .collect(),
             ),
             turn_context.dynamic_tools.as_slice(),
+            turn_context.slate_skills.as_slice(),
         );
         let item = ResponseItem::CustomToolCall {
             id: None,

@@ -132,8 +132,9 @@ impl ExecPolicyManager {
             prefix_rule,
         } = req;
         let exec_policy = self.current();
-        let commands =
-            parse_shell_lc_plain_commands(command).unwrap_or_else(|| vec![command.to_vec()]);
+        let commands = parse_shell_lc_plain_commands(command)
+            .filter(|c| !c.is_empty())
+            .unwrap_or_else(|| vec![command.to_vec()]);
         let exec_policy_fallback = |cmd: &[String]| {
             render_decision_for_unmatched_command(
                 approval_policy,
@@ -1405,5 +1406,27 @@ prefix_rule(
             r#"On all platforms, a forbidden command should require approval
             (unless AskForApproval::Never is specified)."#
         );
+    }
+
+    #[tokio::test]
+    async fn test_create_exec_approval_requirement_with_empty_bash_command() {
+        let policy = ExecPolicyManager::new(Arc::new(Policy::empty()));
+        let features = Features::with_defaults();
+        let permissions = SandboxPermissions::UseDefault;
+
+        // This command parses into an empty list of commands via parse_shell_lc_plain_commands
+        let empty_bash = vec!["bash".to_string(), "-c".to_string(), "".to_string()];
+
+        // This should not panic
+        let _ = policy
+            .create_exec_approval_requirement_for_command(ExecApprovalRequest {
+                features: &features,
+                command: &empty_bash,
+                approval_policy: AskForApproval::Never,
+                sandbox_policy: &SandboxPolicy::ReadOnly,
+                sandbox_permissions: permissions,
+                prefix_rule: None,
+            })
+            .await;
     }
 }

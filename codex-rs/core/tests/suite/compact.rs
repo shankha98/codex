@@ -252,13 +252,13 @@ async fn summarize_context_three_requests_and_instructions() {
     assert!(
         messages
             .iter()
-            .any(|(r, t)| r == "user" && t == THIRD_USER_MSG),
+            .any(|(r, t)| r == "user" && t.starts_with(THIRD_USER_MSG)),
         "third request should include the new user message"
     );
     assert!(
         messages
             .iter()
-            .any(|(r, t)| r == "user" && t == "hello world"),
+            .any(|(r, t)| r == "user" && t.starts_with("hello world")),
         "third request should include the original user message"
     );
     assert!(

@@ -83,10 +83,23 @@ impl ToolCallRuntime {
                             Either::Right(lock.write().await)
                         };
 
-                        router
-                            .dispatch_tool_call(session, turn, tracker, call.clone())
+                        let result = router
+                            .dispatch_tool_call(session.clone(), turn, tracker, call.clone())
                             .instrument(dispatch_span.clone())
-                            .await
+                            .await;
+
+                        if let Ok(ref response) = result {
+                            let text = extract_text_from_response(response);
+                            if !text.is_empty() {
+                                let slate = session.services.slate_client.clone();
+                                let tool_name = call.tool_name.clone();
+                                tokio::spawn(async move {
+                                    let content = format!("Ran tool {}: {}", tool_name, text);
+                                    let _ = slate.focus_transient(&content).await;
+                                });
+                            }
+                        }
+                        result
                     } => res,
                 }
             }));
@@ -133,5 +146,32 @@ impl ToolCallRuntime {
             }
             _ => format!("aborted by user after {secs:.1}s"),
         }
+    }
+}
+
+fn extract_text_from_response(response: &ResponseInputItem) -> String {
+    match response {
+        ResponseInputItem::FunctionCallOutput { output, .. } => output.content.clone(),
+        ResponseInputItem::CustomToolCallOutput { output, .. } => output.clone(),
+        ResponseInputItem::McpToolCallOutput { result, .. } => match result {
+            Ok(res) => {
+                let mut text = String::new();
+                for content in &res.content {
+                    if let Some(t) = content.get("type").and_then(|v| v.as_str()) {
+                        if t == "text" {
+                            if let Some(val) = content.get("text").and_then(|v| v.as_str()) {
+                                if !text.is_empty() {
+                                    text.push('\n');
+                                }
+                                text.push_str(val);
+                            }
+                        }
+                    }
+                }
+                text
+            }
+            Err(e) => e.clone(),
+        },
+        _ => String::new(),
     }
 }
