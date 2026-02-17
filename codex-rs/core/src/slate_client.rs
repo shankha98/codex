@@ -182,8 +182,8 @@ impl SlateClient {
         if let Err(e) = res.error_for_status_ref() {
             // 404: Endpoint not found (older server?)
             // 405: Method not allowed (server only supports POST for creation, not listing)
-            if e.status() == Some(reqwest::StatusCode::NOT_FOUND) 
-                || e.status() == Some(reqwest::StatusCode::METHOD_NOT_ALLOWED) 
+            if e.status() == Some(reqwest::StatusCode::NOT_FOUND)
+                || e.status() == Some(reqwest::StatusCode::METHOD_NOT_ALLOWED)
             {
                 return Ok(vec![]);
             }
